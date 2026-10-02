@@ -1,0 +1,105 @@
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+const workspace = await mkdtemp(join(tmpdir(), "elpod-package-smoke-"));
+const consumer = join(workspace, "consumer");
+const tarball = join(workspace, "elpod-smoke.tgz");
+
+try {
+  await mkdir(consumer, { recursive: true });
+  await writeFile(join(consumer, "package.json"), JSON.stringify({
+    name: "elpod-package-smoke",
+    private: true,
+    type: "module",
+  }) + "\n");
+  await writeFile(join(consumer, "tsconfig.json"), JSON.stringify({
+    compilerOptions: {
+      target: "ESNext",
+      module: "ESNext",
+      moduleResolution: "bundler",
+      types: ["bun"],
+      strict: true,
+      skipLibCheck: true,
+    },
+    include: ["src"],
+  }, null, 2) + "\n");
+
+  await Bun.$`bun pm pack --filename ${tarball} --quiet`.cwd(root);
+  if (!(await Bun.file(tarball).exists())) throw new Error("package tarball was not created");
+
+  await Bun.$`bun install ${tarball}`.cwd(consumer);
+  await Bun.$`bun -e ${`
+    import { Elysia } from "elysia";
+    import { DurableJobDispatcher, EventConsumer, EventOutbox, HttpClient, JobWorker, MemoryEventIdempotencyStore, MemoryJobIdempotencyStore, apiKeyFrom, clientIp, cookieValue, csrfProtection, csrfToken, doctor, etag, inspectorRoutes, negotiateContentType, openTelemetryMetrics, openTelemetryTracer, plugin, safeRedirect, start } from "elpod";
+    if (typeof start !== "function" || typeof plugin !== "function" || typeof HttpClient !== "function" || typeof JobWorker !== "function" || typeof DurableJobDispatcher !== "function" || typeof EventConsumer !== "function" || typeof EventOutbox !== "function" || typeof MemoryEventIdempotencyStore !== "function" || typeof MemoryJobIdempotencyStore !== "function" || typeof clientIp !== "function" || typeof negotiateContentType !== "function" || typeof openTelemetryMetrics !== "function" || typeof openTelemetryTracer !== "function" || typeof safeRedirect !== "function" || typeof csrfProtection !== "function" || typeof csrfToken !== "function" || typeof doctor !== "function" || typeof etag !== "function" || typeof inspectorRoutes !== "function") throw new Error("runtime exports missing");
+    const request = new Request("http://elpod.test", { headers: { "x-api-key": "key", cookie: "session=value" } });
+    if (apiKeyFrom(request) !== "key" || cookieValue(request, "session") !== "value") throw new Error("auth exports failed");
+    const app = new Elysia().get("/", () => "ok");
+    if (typeof app.handle !== "function") throw new Error("Elysia dependency missing");
+  `}`.cwd(consumer);
+
+  const cli = join(consumer, "node_modules/elpod/dist/cli/elpod.js");
+  await Bun.$`bun ${cli} init`.cwd(consumer);
+  if (await Bun.file(join(consumer, "src/features/base")).exists()) {
+    throw new Error("generated app still contains the removed base feature directory");
+  }
+  await Bun.$`bunx tsc --noEmit -p tsconfig.json`.cwd(consumer);
+  await Bun.$`bun -e ${`
+    const { app } = await import("./src/app.ts");
+    if (!app) throw new Error("generated app could not be imported");
+  `}`.cwd(consumer);
+  if (await Bun.file(join(consumer, "Dockerfile")).exists() || await Bun.file(join(consumer, "deploy/kubernetes.yaml")).exists()) {
+    throw new Error("base init unexpectedly generated deployment files");
+  }
+  await Bun.$`bun ${cli} deployment init --docker --kubernetes`.cwd(consumer);
+  if (!(await Bun.file(join(consumer, "Dockerfile")).exists()) || !(await Bun.file(join(consumer, ".dockerignore")).exists())) {
+    throw new Error("generated container files are missing");
+  }
+  if (!(await Bun.file(join(consumer, "Dockerfile")).text()).includes('CMD ["bun", "run", "start"]')) {
+    throw new Error("generated Dockerfile does not own the production start command");
+  }
+  const manifest = await Bun.file(join(consumer, "deploy/kubernetes.yaml")).text();
+  if (!manifest.includes("/health/ready") || !manifest.includes("runAsNonRoot: true")) {
+    throw new Error("generated Kubernetes manifest is missing production probes or security settings");
+  }
+  const deploymentManifest = JSON.parse(await Bun.file(join(consumer, ".elpod/deployment.json")).text()) as { targets?: string[] };
+  if (!deploymentManifest.targets?.includes("docker") || !deploymentManifest.targets.includes("kubernetes")) {
+    throw new Error("deployment manifest did not record selected targets");
+  }
+  const audit = JSON.parse(await Bun.$`bun ${cli} audit --production --strict --json`.cwd(consumer).text()) as { ok?: boolean };
+  if (audit.ok !== true) throw new Error("generated application architecture audit failed");
+  const diagnosis = JSON.parse(await Bun.$`bun ${cli} doctor --json`.cwd(consumer).text()) as { ok?: boolean };
+  if (diagnosis.ok !== true) throw new Error("generated application doctor reported blocking findings");
+  const productionDiagnosis = JSON.parse(await Bun.$`bun ${cli} doctor --production --json`.cwd(consumer).text()) as { ok?: boolean };
+  if (productionDiagnosis.ok !== true) throw new Error("generated production doctor reported blocking findings");
+  await Bun.$`bun run seal`.cwd(consumer);
+
+  const routes = JSON.parse(await Bun.$`bun ${cli} routes --json`.cwd(consumer).text()) as unknown[];
+  if (!routes.some((route) => typeof route === "object" && route !== null && "path" in route)) {
+    throw new Error("packaged CLI route manifest is empty");
+  }
+  if (!routes.some((route) => typeof route === "object" && route !== null && "path" in route && route.path === "/")) {
+    throw new Error("generated app feature route is missing");
+  }
+  const openapi = JSON.parse(await Bun.$`bun ${cli} openapi`.cwd(consumer).text()) as { openapi?: string };
+  if (openapi.openapi !== "3.1.0") throw new Error("packaged CLI OpenAPI output is invalid");
+
+  const help = await Bun.$`bun ${cli} --help`.cwd(consumer).text();
+  if (!help.includes("elpod —") || !help.includes("elpod audit") ||
+    !help.includes("elpod doctor") || !help.includes("elpod dev") ||
+    !help.includes("elpod routes --json") || !help.includes("elpod make:feature")) {
+    throw new Error("packaged CLI help is incomplete");
+  }
+
+  await Bun.$`bun ${cli} make:feature billing`.cwd(consumer);
+  if (!(await Bun.file(join(consumer, "src/features/billing/billing.controller.ts")).exists())) {
+    throw new Error("packaged feature generator did not create a controller");
+  }
+
+  console.log("package smoke test passed");
+} finally {
+  await rm(workspace, { recursive: true, force: true });
+}

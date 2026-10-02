@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and design discussions
+    url: https://github.com/acefolioDev/elpod/discussions
+    about: Ask usage questions or discuss a proposed direction.
+  - name: Security vulnerability
+    url: https://github.com/acefolioDev/elpod/security/advisories/new
+    about: Report security issues privately; do not open a public issue.

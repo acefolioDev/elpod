@@ -1,0 +1,186 @@
+import type { AnyElysia } from "elysia";
+import { TooManyRequests } from "../errors/errors";
+import { observeOperation, type OperationTelemetry } from "../observability/operation";
+
+export type RateLimitDecision = {
+  readonly allowed: boolean;
+  readonly limit: number;
+  readonly remaining: number;
+  /** Absolute epoch time in milliseconds when the current window resets. */
+  readonly resetAt: number;
+};
+
+/**
+ * A store must make consume atomic for its deployment model. The in-memory
+ * implementation below is safe within one process; distributed applications
+ * should provide a Redis or other shared-store implementation.
+ */
+export type RateLimitStore = {
+  consume(key: string, limit: number, windowMs: number): RateLimitDecision | Promise<RateLimitDecision>;
+};
+
+export type RateLimitEvent = {
+  readonly operation: "decision";
+  readonly name: string;
+  readonly allowed: boolean;
+  readonly limit: number;
+  readonly remaining: number;
+  readonly resetAt: number;
+};
+
+export type RateLimitOptions = OperationTelemetry & {
+  readonly limit: number;
+  readonly windowMs: number;
+  readonly now?: () => number;
+  readonly key?: (request: Request) => string | Promise<string>;
+  readonly name?: string;
+  readonly store?: RateLimitStore;
+  readonly skip?: (request: Request) => boolean | Promise<boolean>;
+  readonly onEvent?: (event: RateLimitEvent) => void;
+};
+
+export class MemoryRateLimitStore implements RateLimitStore {
+  private readonly buckets = new Map<string, { count: number; resetAt: number }>();
+  private readonly maxKeys: number;
+  private readonly now: () => number;
+
+  constructor(options: { readonly maxKeys?: number; readonly now?: () => number } = {}) {
+    this.maxKeys = options.maxKeys ?? 10_000;
+    this.now = options.now ?? Date.now;
+    if (!Number.isInteger(this.maxKeys) || this.maxKeys < 1) {
+      throw new Error("MemoryRateLimitStore maxKeys must be a positive integer");
+    }
+  }
+
+  consume(key: string, limit: number, windowMs: number): RateLimitDecision {
+    validateKey(key);
+    validateLimit(limit);
+    validateWindow(windowMs);
+    const now = this.now();
+    this.purge(now);
+
+    let bucket = this.buckets.get(key);
+    if (!bucket || bucket.resetAt <= now) {
+      if (!bucket && this.buckets.size >= this.maxKeys) {
+        return {
+          allowed: false,
+          limit,
+          remaining: 0,
+          resetAt: this.nextResetAt(now, windowMs),
+        };
+      }
+      bucket = { count: 0, resetAt: now + windowMs };
+      this.buckets.set(key, bucket);
+    }
+
+    bucket.count += 1;
+    return {
+      allowed: bucket.count <= limit,
+      limit,
+      remaining: Math.max(0, limit - bucket.count),
+      resetAt: bucket.resetAt,
+    };
+  }
+
+  clear() {
+    this.buckets.clear();
+  }
+
+  private purge(now: number) {
+    for (const [key, bucket] of this.buckets) {
+      if (bucket.resetAt <= now) this.buckets.delete(key);
+    }
+  }
+
+  private nextResetAt(now: number, fallbackWindowMs: number) {
+    let next = now + fallbackWindowMs;
+    for (const bucket of this.buckets.values()) next = Math.min(next, bucket.resetAt);
+    return next;
+  }
+}
+
+export function rateLimit(options: RateLimitOptions) {
+  validateOptions(options);
+  const store = options.store ?? new MemoryRateLimitStore();
+  const name = options.name ?? "default";
+  const key = options.key ?? (() => "anonymous");
+  const now = options.now ?? Date.now;
+
+  return (app: AnyElysia) => app.onBeforeHandle({ as: "global" }, async ({ request, set }) => {
+    if (await options.skip?.(request)) return;
+
+    const identity = await key(request);
+    if (!identity || identity.trim() === "") throw new Error("rateLimit key must return a non-empty string");
+    if (identity.length > 512) throw new Error("rateLimit key must be at most 512 characters");
+
+    return observeOperation(options, "security.rate_limit", async () => {
+      const decision = await store.consume(rateLimitKey(name, identity), options.limit, options.windowMs);
+      validateDecision(decision);
+      observe(options.onEvent, {
+        operation: "decision",
+        name,
+        allowed: decision.allowed,
+        limit: decision.limit,
+        remaining: decision.remaining,
+        resetAt: decision.resetAt,
+      });
+      const resetInSeconds = Math.max(0, Math.ceil((decision.resetAt - now()) / 1000));
+      set.headers["ratelimit-limit"] = String(decision.limit);
+      set.headers["ratelimit-remaining"] = String(decision.remaining);
+      set.headers["ratelimit-reset"] = String(resetInSeconds);
+      // Keep the widely used legacy names during the alpha period.
+      set.headers["x-ratelimit-limit"] = String(decision.limit);
+      set.headers["x-ratelimit-remaining"] = String(decision.remaining);
+      set.headers["x-ratelimit-reset"] = String(Math.ceil(decision.resetAt / 1000));
+
+      if (!decision.allowed) {
+        const retryAfter = Math.max(1, Math.ceil((decision.resetAt - now()) / 1000));
+        set.headers["retry-after"] = String(retryAfter);
+        throw TooManyRequests();
+      }
+    }, { "rate_limit.name": name });
+  }) as AnyElysia;
+}
+
+function validateOptions(options: RateLimitOptions) {
+  validateLimit(options.limit);
+  validateWindow(options.windowMs);
+  if (options.name !== undefined && (!options.name || options.name.length > 128 || /[\r\n]/.test(options.name))) {
+    throw new Error("rateLimit name must be a non-empty single-line string of at most 128 characters");
+  }
+}
+
+function validateLimit(limit: number) {
+  if (!Number.isInteger(limit) || limit < 1) throw new Error("rateLimit limit must be a positive integer");
+}
+
+function validateWindow(windowMs: number) {
+  if (!Number.isFinite(windowMs) || windowMs <= 0) throw new Error("rateLimit windowMs must be a positive number");
+}
+
+function validateKey(key: string) {
+  if (!key || key.length > 512 || /[\r\n]/.test(key)) {
+    throw new Error("rateLimit key must be a non-empty single-line string of at most 512 characters");
+  }
+}
+
+function rateLimitKey(name: string, identity: string) {
+  return `${encodeURIComponent(name)}:${encodeURIComponent(identity)}`;
+}
+
+function validateDecision(decision: RateLimitDecision) {
+  if (typeof decision.allowed !== "boolean") throw new Error("rateLimit store returned an invalid allowed value");
+  if (!Number.isInteger(decision.limit) || decision.limit < 1) throw new Error("rateLimit store returned an invalid limit");
+  if (!Number.isInteger(decision.remaining) || decision.remaining < 0 || decision.remaining > decision.limit) {
+    throw new Error("rateLimit store returned an invalid remaining value");
+  }
+  if (!Number.isFinite(decision.resetAt)) throw new Error("rateLimit store returned an invalid resetAt value");
+}
+
+function observe(observer: ((event: RateLimitEvent) => void) | undefined, event: RateLimitEvent) {
+  try {
+    observer?.(event);
+  } catch {
+    // Rate-limit telemetry must not change request protection semantics.
+  }
+}

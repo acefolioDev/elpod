@@ -1,0 +1,51 @@
+name: Bug report
+description: Report a reproducible problem in Elpod
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a problem. Please remove secrets and private data from examples.
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: Include Bun, Elpod, Elysia, and operating system versions.
+      placeholder: Bun 1.4.x, Elpod 0.0.1, Elysia 1.4.x, macOS/Linux
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Provide the smallest runnable reproduction or a link to one.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or stack trace
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and Discussions.
+          required: true
+        - label: I removed secrets and private data from this report.
+          required: true

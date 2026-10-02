@@ -1,0 +1,67 @@
+import { describe, expect, test } from "bun:test";
+import { application, pod } from "../src/kernel/application/feature";
+import { start } from "../src/kernel/application/start";
+import type { ElpodElysia } from "../src/kernel/http/http";
+
+describe("start", () => {
+  test("starts native Elysia and disposes the provider graph exactly once", async () => {
+    let disposals = 0;
+    class Resource {
+      dispose() {
+        disposals += 1;
+      }
+    }
+
+    class Controller {
+      static readonly inject = [Resource] as const;
+
+      constructor(private readonly resource: Resource) {}
+
+      routes(app: ElpodElysia) {
+        return app.get("/", () => this.resource instanceof Resource ? "ok" : "bad");
+      }
+    }
+
+    const started = await start(
+      application({
+        features: [pod({ name: "start", prefix: "/start", controller: Controller })],
+        providers: [Resource],
+      }),
+      { listen: 0, printFeatures: false, seal: false, shutdown: false },
+    );
+
+    const response = await started.server.handle(new Request("http://localhost/start/"));
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("ok");
+
+    await started.stop();
+    await started.stop();
+    expect(disposals).toBe(1);
+  });
+
+  test("shares concurrent stop calls and waits for provider disposal", async () => {
+    let disposals = 0;
+    class Resource {
+      dispose() {
+        disposals += 1;
+      }
+    }
+    class Controller {
+      static readonly inject = [Resource] as const;
+      constructor(private readonly resource: Resource) {}
+      routes(app: ElpodElysia) {
+        return app.get("/", () => this.resource instanceof Resource ? "ok" : "bad");
+      }
+    }
+    const started = await start(
+      application({ features: [pod({ name: "concurrent", prefix: "/concurrent", controller: Controller })], providers: [Resource] }),
+      { listen: 0, printFeatures: false, seal: false, shutdown: false },
+    );
+
+    const first = started.stop();
+    const second = started.stop();
+    expect(second).toBe(first);
+    await Promise.all([first, second]);
+    expect(disposals).toBe(1);
+  });
+});

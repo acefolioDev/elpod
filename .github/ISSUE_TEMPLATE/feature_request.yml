@@ -1,0 +1,38 @@
+name: Feature request
+description: Suggest a focused improvement to Elpod
+title: "feature: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: Who has the problem, and what happens today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed direction
+      description: Describe the smallest useful change. API sketches are welcome.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: textarea
+    id: boundary
+    attributes:
+      label: Boundary and compatibility
+      description: Explain whether this belongs in Elpod, an adapter, a template, or application code.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and Discussions.
+          required: true
+        - label: I understand this is a working alpha and the API may change.
+          required: true

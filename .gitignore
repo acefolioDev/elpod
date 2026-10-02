@@ -1,0 +1,16 @@
+node_modules
+.DS_Store
+*.log
+dist
+.env
+.env.*
+!/.env.example
+examples/*
+elpod-example/*
+elpod-demo/*
+
+# Maintainer-only planning (local; not published in the repo)
+docs/launch-plan.md
+docs/issue-backlog.md
+docs/examples-plan.md
+docs/package-metadata.md
