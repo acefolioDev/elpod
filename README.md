@@ -9,6 +9,8 @@ An enterprise-friendly structure for Elysia applications: explicit constructor D
 
 > Working alpha. APIs and conventions may change. Elpod is a foundation for application structure, not a production-readiness or security guarantee.
 
+**Documentation:** [https://elpod.vercel.app/](https://elpod.vercel.app/)
+
 ## Why Elpod?
 
 Elpod is for teams building a medium-to-large Bun/Elysia service who want named feature boundaries, visible dependency graphs, and useful operational checks without replacing Elysia. It is not a database, identity provider, message broker, deployment platform, or drop-in NestJS migration.
@@ -103,7 +105,7 @@ export const hello = pod({
 
 The core composition model, native routing, DI, lifecycle, configuration, health checks, security primitives, observability boundaries, events/jobs boundaries, cache primitives, HTTP client, testing harness, and CLI diagnostics are implemented. Vendor database adapters, durable queues and brokers, distributed cache/rate limiting, OpenTelemetry SDK/exporter setup, identity providers, and deployment hardening remain application-owned or planned.
 
-See [the production boundary](./docs/production-boundary.md) and [the roadmap](./ROADMAP.md). For the full documentation map, visit [`docs/README.md`](./docs/README.md).
+See [the production boundary](./docs/production-boundary.md) and [the roadmap](./ROADMAP.md). Overview and guides: [elpod.vercel.app](https://elpod.vercel.app/); full in-repo map: [`docs/README.md`](./docs/README.md).
 
 ## Contributing
 
